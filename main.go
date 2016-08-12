@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/HouzuoGuo/tiedot/db"
-	shortid "github.com/ventu-io/go-shortid"
 	"goji.io"
 	"goji.io/pat"
 	"golang.org/x/net/context"
@@ -101,17 +100,6 @@ func (d *DBController) SetupCollections(cfgFilePath string) {
 				panic(err)
 			}
 
-			coll := d.DB.Use(collName)
-			if coll == nil {
-				panic("could not use collection")
-			}
-
-			// Create index for id attribute for every new collection.
-			// It is used for shortIDs.
-			if err := coll.Index([]string{"id"}); err != nil {
-				panic(err)
-			}
-
 			allCollections = append(allCollections, collName)
 		} else {
 			fmt.Printf("skipping '%s': already exists\n", collName)
@@ -151,27 +139,37 @@ func (d *DBController) CreateDocumentHandler(ctx context.Context, w http.Respons
 		return
 	}
 
-	// Generate unique short id for the object.
-	sid, err := shortid.Generate()
+	// Insert object into collection.
+	docID, err := coll.Insert(js)
 	if err != nil {
-		WriteResponse(ctx, w, http.StatusInternalServerError, map[string]interface{}{
-			"error": "could not generate unique id",
-		})
-		return
-	}
-
-	js["id"] = sid
-
-	// Insert object into collection. Discard db id since we use extra indexed shortIDs.
-	if _, err := coll.Insert(js); err != nil {
 		WriteResponse(ctx, w, http.StatusInternalServerError, map[string]interface{}{
 			"error": "could not insert document: " + err.Error(),
 		})
 		return
 	}
 
+	// Read it back to add id to document.
+	readBack, err := coll.Read(docID)
+	if err != nil {
+		WriteResponse(ctx, w, http.StatusInternalServerError, map[string]interface{}{
+			"error": "could not insert document: " + err.Error(),
+		})
+		return
+	}
+
+	readBack["id"] = strconv.Itoa(docID)
+
+	if err := coll.Update(docID, readBack); err != nil {
+		WriteResponse(ctx, w, http.StatusInternalServerError, map[string]interface{}{
+			"error": "could not add id to document: " + err.Error(),
+		})
+		return
+	}
+
+	fmt.Println("created document:", readBack)
+
 	// Everything done. Return document.
-	WriteResponse(ctx, w, http.StatusCreated, js)
+	WriteResponse(ctx, w, http.StatusCreated, readBack)
 }
 
 // ReadCollectionHandler handles: GET /db/:collection.
@@ -221,56 +219,118 @@ func (d *DBController) Search(collection string, query interface{}) (map[string]
 	return result, nil
 }
 
-// ReadDocumentHandler queries the given collection for a given shortid
+// ReadDocumentHandler queries the given collection for a given id
 // and serves the found document if it exists.
 func (d *DBController) ReadDocumentHandler(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	collName := pat.Param(ctx, "collection")
-	sid := pat.Param(ctx, "sid")
+	strid := pat.Param(ctx, "id")
 
-	// Query by short id.
-	var query interface{}
-	qStr := fmt.Sprintf("[{\"eq\": \"%s\", \"in\": [\"id\"], \"limit\": 1}]", sid)
-	fmt.Println(qStr)
-	if err := json.Unmarshal([]byte(qStr), &query); err != nil {
-		WriteResponse(ctx, w, http.StatusInternalServerError, map[string]interface{}{
-			"error": "problem building db query",
-		})
-		return
-	}
-
-	result, err := d.Search(collName, query)
-	fmt.Println(result)
+	id, err := strconv.Atoi(strid)
+	fmt.Println(strid, id)
 	if err != nil {
-		WriteResponse(ctx, w, http.StatusInternalServerError, map[string]interface{}{
-			"error": "error querying db",
+		WriteResponse(ctx, w, http.StatusBadRequest, map[string]interface{}{
+			"error": "id cannot be parsed to number",
 		})
 		return
 	}
 
-	one := result["results"]
-	arrayOne, ok := one.([]interface{})
-	fmt.Println(arrayOne)
-	if !ok {
+	coll := d.DB.Use(collName)
+	if coll == nil {
 		WriteResponse(ctx, w, http.StatusInternalServerError, map[string]interface{}{
-			"error": "broken data",
+			"error": "could not use collection " + collName,
 		})
 		return
 	}
 
-	if len(arrayOne) < 1 {
+	result, err := coll.Read(id)
+	if err != nil {
 		WriteResponse(ctx, w, 422, map[string]interface{}{
 			"error": "document not found",
 		})
 		return
 	}
 
-	WriteResponse(ctx, w, http.StatusOK, arrayOne[0])
+	WriteResponse(ctx, w, http.StatusOK, result)
 }
 
+// UpdateDocumentHandler queries the given collection for a given id
+// and updates the found document with the payload json data.
 func (d *DBController) UpdateDocumentHandler(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	collName := pat.Param(ctx, "collection")
+	strid := pat.Param(ctx, "id")
+
+	id, err := strconv.Atoi(strid)
+	fmt.Println(strid, id)
+	if err != nil {
+		WriteResponse(ctx, w, http.StatusBadRequest, map[string]interface{}{
+			"error": "id cannot be parsed to number",
+		})
+		return
+	}
+
+	coll := d.DB.Use(collName)
+	if coll == nil {
+		WriteResponse(ctx, w, http.StatusInternalServerError, map[string]interface{}{
+			"error": "could not use collection " + collName,
+		})
+		return
+	}
+
+	// Parse JSON object from POST parameter.
+	js, err := ParsePostJSON(r)
+	if err != nil {
+		WriteResponse(ctx, w, http.StatusBadRequest, map[string]interface{}{
+			"error": "request body does not contain valid json: " + err.Error(),
+		})
+		return
+	}
+
+	// Always replace id with correct id == avoid user errors.
+	js["id"] = strconv.Itoa(id)
+
+	if err = coll.Update(id, js); err != nil {
+		WriteResponse(ctx, w, http.StatusInternalServerError, map[string]interface{}{
+			"error": "could not update document",
+		})
+		return
+	}
+
+	// Update successful
+	WriteResponse(ctx, w, http.StatusOK, js)
 }
 
+// DeleteDocumentHandler deletes document with given id from given collection.
 func (d *DBController) DeleteDocumentHandler(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	collName := pat.Param(ctx, "collection")
+	strid := pat.Param(ctx, "id")
+
+	id, err := strconv.Atoi(strid)
+	fmt.Println(strid, id)
+	if err != nil {
+		WriteResponse(ctx, w, http.StatusBadRequest, map[string]interface{}{
+			"error": "id cannot be parsed to number",
+		})
+		return
+	}
+
+	coll := d.DB.Use(collName)
+	if coll == nil {
+		WriteResponse(ctx, w, http.StatusInternalServerError, map[string]interface{}{
+			"error": "could not use collection " + collName,
+		})
+		return
+	}
+
+	if err := coll.Delete(id); err != nil {
+		WriteResponse(ctx, w, http.StatusInternalServerError, map[string]interface{}{
+			"error": "could not delete document with id " + strid,
+		})
+		return
+	}
+
+	WriteResponse(ctx, w, http.StatusOK, map[string]interface{}{
+		"id": strid,
+	})
 }
 
 // ReadCollectionHandler handles: POST /db/search/:collection.
@@ -291,24 +351,10 @@ func (d *DBController) SearchCollectionHandler(ctx context.Context, w http.Respo
 	//		return
 	//	}
 
+	// sorry no more time for now..
 }
 
 func main() {
-	// A custom abc to use for short id characters can be defined as follows:
-	// Needs to have 64 different characters. This one equals the shortid.DefaultABC
-	// and should be compatible with our purpose.
-	// customABC := "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-"
-
-	// Init short id library.
-	// NOTE: The package guarantees the generation of unique Ids with no collisions for 34 years
-	// (1/1/2016-1/1/2050) using the same worker Id within a single (although can be concurrent)
-	// application provided application restarts take longer than 1 millisecond.
-	sid, err := shortid.New(1, shortid.DefaultABC, 1)
-	if err != nil {
-		panic(err)
-	}
-	shortid.SetDefault(sid)
-
 	// Read command line flags.
 	var port int
 	flag.IntVar(&port, "p", 8888, "specify port to use")
@@ -332,9 +378,9 @@ func main() {
 	mux.HandleFuncC(pat.Get("/db/:collection"), dbController.ReadCollectionHandler)
 
 	mux.HandleFuncC(pat.Post("/db/:collection"), dbController.CreateDocumentHandler)
-	mux.HandleFuncC(pat.Get("/db/:collection/:sid"), dbController.ReadDocumentHandler)
-	mux.HandleFuncC(pat.Put("/db/:collection/:sid"), dbController.UpdateDocumentHandler)
-	mux.HandleFuncC(pat.Delete("/db/:collection/:sid"), dbController.DeleteDocumentHandler)
+	mux.HandleFuncC(pat.Get("/db/:collection/:id"), dbController.ReadDocumentHandler)
+	mux.HandleFuncC(pat.Put("/db/:collection/:id"), dbController.UpdateDocumentHandler)
+	mux.HandleFuncC(pat.Delete("/db/:collection/:id"), dbController.DeleteDocumentHandler)
 
 	mux.HandleFuncC(pat.Post("/db/search/:collection"), dbController.SearchCollectionHandler)
 
