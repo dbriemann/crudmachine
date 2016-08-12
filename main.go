@@ -226,7 +226,6 @@ func (d *DBController) ReadDocumentHandler(ctx context.Context, w http.ResponseW
 	strid := pat.Param(ctx, "id")
 
 	id, err := strconv.Atoi(strid)
-	fmt.Println(strid, id)
 	if err != nil {
 		WriteResponse(ctx, w, http.StatusBadRequest, map[string]interface{}{
 			"error": "id cannot be parsed to number",
