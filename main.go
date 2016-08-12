@@ -58,7 +58,7 @@ func NewDBController(db *db.DB) *DBController {
 	return c
 }
 
-// CreateCollections reads all collection names from the config file
+// SetupCollections reads all collection names from the config file
 // and creates the collections in the database if they don't exist yet.
 // This should be run at startup.
 func (d *DBController) SetupCollections(cfgFilePath string) {
@@ -333,7 +333,7 @@ func (d *DBController) DeleteDocumentHandler(ctx context.Context, w http.Respons
 	})
 }
 
-// ReadCollectionHandler handles: POST /db/search/:collection.
+// SearchCollectionHandler handles: POST /db/search/:collection.
 // Return all documents contained in the given collection fulfilling the query properties.
 // Expects a Tiedot query string. See: https://github.com/HouzuoGuo/tiedot/wiki/Query-processor-and-index
 // Payload example:
@@ -382,6 +382,7 @@ func main() {
 	mux.HandleFuncC(pat.Put("/db/:collection/:id"), dbController.UpdateDocumentHandler)
 	mux.HandleFuncC(pat.Delete("/db/:collection/:id"), dbController.DeleteDocumentHandler)
 
+	// TODO this method still needs implementation..
 	mux.HandleFuncC(pat.Post("/db/search/:collection"), dbController.SearchCollectionHandler)
 
 	// Start http server.
